@@ -43,6 +43,7 @@ if (! class_exists('AdvancedGutenbergMain')) {
             global $wp_version;
 
             add_action('init', array( $this, 'registerPostMeta' ));
+            add_action('admin_init', array($this, 'addCustomStylesToReusableBlocks'));
             add_action('admin_init', array( $this, 'registerStylesScripts' ));
             add_action('wp_loaded', [ 'PublishPress\Blocks\Controls', 'addAttributes' ], 999);
             add_filter('rest_pre_dispatch', [ 'PublishPress\Blocks\Controls', 'removeAttributes' ], 10, 3);
@@ -862,6 +863,9 @@ if (! class_exists('AdvancedGutenbergMain')) {
         {
             // Block Content Display
             require_once(plugin_dir_path(dirname(__FILE__)) . 'assets/blocks/recent-posts/block.php');
+            // Load all block registrations
+            require_once(plugin_dir_path(dirname(__FILE__)) . 'assets/blocks/register-blocks.php');
+
         }
 
         /**
@@ -1270,7 +1274,8 @@ if (! class_exists('AdvancedGutenbergMain')) {
                 'enable_block_usage',
                 'enable_custom_styles',
                 'enable_advgb_blocks',
-                'reusable_blocks'
+                'reusable_blocks',
+                'auto_insert_blocks'
             ];
 
             // Pro features
@@ -1875,7 +1880,7 @@ if (! class_exists('AdvancedGutenbergMain')) {
                 ],
                 [
                     'slug'     => 'advgb_block_settings',
-                    'title'    => esc_html__('PublishPress Blocks', 'advanced-gutenberg'),
+                    'title'    => esc_html__('Extra Blocks', 'advanced-gutenberg'),
                     'callback' => 'loadBlockSettingsPage',
                     'order'    => 3,
                     'enabled'  => Utilities::settingIsEnabled('enable_advgb_blocks')
@@ -2954,13 +2959,21 @@ if (! class_exists('AdvancedGutenbergMain')) {
                 return false;
             }
 
-            if (isset($_POST['advgb_block_access_save'])) {
-                // Save Block Access
+            if ( isset( $_POST['advgb_block_access_save'] ) ) {
+                // Save Block Access for single role
                 $this->blocksFeatureSave(
-                    'access', // Feature in lowercase
-                    'advgb_blocks_user_roles' // Database option to update
+                    'access',
+                    'advgb_blocks_user_roles'
                 );
+                return true;
+            }
 
+            if ( isset( $_POST['advgb_block_access_save_all_roles'] ) ) {
+                // Save Block Access for all roles
+                $this->blocksFeatureSaveAllRoles(
+                    'access',
+                    'advgb_blocks_user_roles'
+                );
                 return true;
             }
 
@@ -2996,8 +3009,7 @@ if (! class_exists('AdvancedGutenbergMain')) {
          *
          * @return string
          */
-        public function getCustomStylesContent($content)
-        {
+        public function getCustomStylesContent($content) {
             if (!Utilities::settingIsEnabled('enable_custom_styles')) {
                 return '';
             }
@@ -3007,17 +3019,45 @@ if (! class_exists('AdvancedGutenbergMain')) {
                 $css = '';
 
                 foreach ($custom_styles as $styles) {
-                    // @TODO Check if the class is in use in the post and widgets
-                    //if (strpos($content, $styles['name']) !== false) {
-                    $css .= '.' . $styles['name'] . " {\n";
-                    $css .= AdvancedGutenbergBlockStyles::css_array_to_string($styles['css']) . "\n} \n";
-                    //}
+                    if (isset($styles['generated_css']) && !empty($styles['generated_css'])) {
+                        $css .= $styles['generated_css'];
+                    } else {
+                        // Fallback: generate CSS on the fly for legacy data
+                        $css .= AdvancedGutenbergBlockStyles::generate_final_css($styles['css'], $styles['name']);
+                    }
                 }
 
-                if (! empty($css)) {
+                if (!empty($css)) {
                     echo '<style type="text/css">' . strip_tags($css) . '</style>';
                 }
             }
+        }
+
+        private function getAdminEditorCustomStyles() {
+
+            $content = '';
+            $custom_styles = get_option('advgb_custom_styles', AdvancedGutenbergBlockStyles::$default_custom_styles);
+
+            if (is_array($custom_styles)) {
+                foreach ($custom_styles as $styles) {
+                    // post editor
+                    $class_name = '.block-editor-writing-flow .' . $styles['name'];
+                    // resusable block editor
+                    $class_name .= ', .editor-visual-editor iframe .' . $styles['name'];
+                    $class_name .= ', .block-editor-iframe__body .' . $styles['name'];
+
+                    if (isset($styles['generated_css']) && !empty($styles['generated_css'])) {
+                        $admin_css = str_replace('.' . $styles['name'], $class_name, $styles['generated_css']);
+                        $content .= $admin_css;
+                    } else {
+                        // Fallback: generate CSS on the fly for legacy data
+                        $content .= AdvancedGutenbergBlockStyles::generate_final_css($styles['css'], $class_name);
+                    }
+                }
+            }
+
+            return $content;
+
         }
 
         /**
@@ -3025,22 +3065,41 @@ if (! class_exists('AdvancedGutenbergMain')) {
          *
          * @return void
          */
-        public function loadCustomStylesAdmin()
-        {
+        public function loadCustomStylesAdmin() {
             if (!Utilities::settingIsEnabled('enable_custom_styles')) {
                 return;
             }
 
-            $custom_styles = get_option('advgb_custom_styles', AdvancedGutenbergBlockStyles::$default_custom_styles);
+            $custom_styles = $this->getAdminEditorCustomStyles();
 
-            if (is_array($custom_styles)) {
-                $content = '';
-                foreach ($custom_styles as $styles) {
-                    $content .= '.block-editor-writing-flow .' . esc_html($styles['name']) . " {\n";
-                    $content .= AdvancedGutenbergBlockStyles::css_array_to_string($styles['css']) . "\n} \n";
-                }
+            if (!empty($custom_styles)) {
+                echo '<style type="text/css">' . strip_tags($custom_styles) . '</style>';
+            }
+        }
 
-                echo '<style type="text/css">' . strip_tags($content) . '</style>';
+        public function addCustomStylesToReusableBlocks() {
+
+            if (!Utilities::settingIsEnabled('enable_custom_styles')) {
+                return;
+            }
+
+            if (get_post_type() === 'wp_block') {
+                add_filter('block_editor_settings_all', function($settings) {
+
+                    $custom_styles = $this->getAdminEditorCustomStyles();
+
+                    if (!empty($custom_styles)) {
+                        if (!isset($settings['styles'])) {
+                            $settings['styles'] = [];
+                        }
+
+                        $settings['styles'][] = [
+                            'css' => $custom_styles,
+                        ];
+                    }
+
+                    return $settings;
+                }, 20);
             }
         }
 
@@ -3088,6 +3147,8 @@ if (! class_exists('AdvancedGutenbergMain')) {
                 return false;
             }
 
+            $user_role = !empty($_POST['user_role']) ? sanitize_text_field($_POST['user_role']) : '';
+
             if (
                 isset($_POST['blocks_list'])
                 && isset($_POST['active_blocks'])
@@ -3096,7 +3157,6 @@ if (! class_exists('AdvancedGutenbergMain')) {
                 && ! empty($_POST['user_role'])
             ) {
                 // @TODO - Check if user role exists - https://gist.github.com/hlashbrooke/8f901da7c6f0d107add7
-                $user_role       = sanitize_text_field($_POST['user_role']);
                 $blocks_list     = array_map(
                     'sanitize_text_field',
                     json_decode(stripslashes($_POST['blocks_list'])) // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
@@ -3110,6 +3170,88 @@ if (! class_exists('AdvancedGutenbergMain')) {
                 $block_feature_by_role[ $user_role ]['inactive_blocks'] = isset($inactive_blocks) ? $inactive_blocks : '';
 
                 update_option($option, $block_feature_by_role, false);
+
+                // Redirect with success message
+                wp_safe_redirect(
+                    add_query_arg(
+                        [
+                            'user_role' => $user_role,
+                            'save'      => 'success'
+                        ],
+                        wp_get_referer()
+                    )
+                );
+            } else {
+                // Redirect with error message / Nothing was saved
+                wp_safe_redirect(
+                    add_query_arg(
+                        [
+                            'user_role' => $user_role,
+                            'save'      => 'error'
+                        ],
+                        wp_get_referer()
+                    )
+                );
+            }
+        }
+
+        /**
+         * Save blocks feature for all roles
+         *
+         * @param string $feature        Feature name in lowercase
+         * @param string $database_option Database option to update
+         *
+         * @return void
+         * @since 3.5.2
+         */
+        public function blocksFeatureSaveAllRoles( $feature, $database_option ) {
+            // Check nonce field exist
+            if (! isset($_POST[ 'advgb_block_' . $feature . '_nonce_field' ])) {
+                return false;
+            }
+            // Verify nonce
+            if (
+                ! wp_verify_nonce(
+                    sanitize_key($_POST[ 'advgb_block_' . $feature . '_nonce_field' ]),
+                    'advgb_nonce'
+                )
+            ) {
+                return false;
+            }
+
+            if (! current_user_can('administrator')) {
+                return false;
+            }
+
+            $user_role = !empty($_POST['user_role']) ? sanitize_text_field($_POST['user_role']) : '';
+
+            if (
+                isset($_POST['blocks_list'])
+                && isset($_POST['active_blocks'])
+                && is_array($_POST['active_blocks'])
+                && isset($_POST['user_role'])
+                && ! empty($_POST['user_role'])
+            ) {
+                $blocks_list     = array_map(
+                    'sanitize_text_field',
+                    json_decode(stripslashes($_POST['blocks_list'])) // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+                );
+                $active_blocks   = isset( $_POST['active_blocks'] ) ? array_map('sanitize_text_field', $_POST['active_blocks']) : [];
+                $inactive_blocks = array_values(array_diff($blocks_list, $active_blocks));
+
+                $all_roles = wp_roles()->roles;
+
+                $blocks_user_roles = get_option( $database_option, array() );
+
+                foreach ( $all_roles as $role_key => $role_data ) {
+                    $blocks_user_roles[ $role_key ] = array(
+                        'active_blocks'   => $active_blocks,
+                        'inactive_blocks' => $inactive_blocks,
+                    );
+                }
+
+                // Save to database
+                update_option( $database_option, $blocks_user_roles, false );
 
                 // Redirect with success message
                 wp_safe_redirect(
@@ -3217,6 +3359,10 @@ if (! class_exists('AdvancedGutenbergMain')) {
                 'blockCategories' => $blockCategories,
                 'saved_blocks' => $saved_blocks,
                 'postTypes' => $this->get_editor_post_types(),
+                'isProActive' => Utilities::isProActive(),
+                'promoLink' => ADVANCED_GUTENBERG_UPGRADE_LINK,
+                'upgradeText'   => __( 'Upgrade to Pro', 'advanced-gutenberg' ),
+                 'proText'   => __( 'Pro', 'advanced-gutenberg' ),
                 'initialData' => [
                     'usage' => [],
                     'lastScanDate' => '',
@@ -3410,7 +3556,7 @@ if (! class_exists('AdvancedGutenbergMain')) {
                                 $page_ = sanitize_text_field($_GET['page']);
                                 ?>
                                 <input type="hidden" name="advgb_page_slug" id="advgb_page_slug" value="<?php
-                                esc_attr_e($page_) ?>"/>
+                                echo esc_attr($page_) ?>"/>
                                 <?php
                             } ?>
                             <input type="hidden" name="advgb_feature" id="advgb_feature" value="<?php
@@ -3465,15 +3611,13 @@ if (! class_exists('AdvancedGutenbergMain')) {
                                         <span class="dashicons dashicons-warning"></span>
                                     </span>
                                 </span>
-                                <button class="button button-primary save-profile-button"
-                                        type="submit"
-                                        name="advgb_block_<?php
-                                        echo $feature ?>_save"
-                                >
-                                    <span>
-                                        <?php
-                                        printf(__('Save %s', 'advanced-gutenberg'), $label); ?>
-                                    </span>
+                                <button type="submit" name="advgb_block_<?php
+                                        echo $feature ?>_save" class="button button-primary save-profile-button">
+                                    <?php esc_html_e( 'Save Role Block Permissions', 'advanced-gutenberg' ); ?>
+                                </button>
+                                <button type="submit" name="advgb_block_<?php
+                                        echo $feature ?>_save_all_roles" class="button button-secondary save-profile-button" style="margin-left: 10px;">
+                                    <?php esc_html_e( 'Save Permission for all Roles', 'advanced-gutenberg' ); ?>
                                 </button>
                             </div>
                         </div>
@@ -3491,15 +3635,13 @@ if (! class_exists('AdvancedGutenbergMain')) {
 
                         <!-- Save button -->
                         <div class="advgb-form-buttons-bottom">
-                            <button class="button button-primary save-profile-button"
-                                    type="submit"
-                                    name="advgb_block_<?php
-                                    echo $feature ?>_save"
-                            >
-                                <span>
-                                    <?php
-                                    printf(__('Save %s', 'advanced-gutenberg'), $label); ?>
-                                </span>
+                            <button type="submit" name="advgb_block_<?php
+                                    echo $feature ?>_save" class="button button-primary save-profile-button">
+                                <?php esc_html_e( 'Save Role Block Permissions', 'advanced-gutenberg' ); ?>
+                            </button>
+                            <button type="submit" name="advgb_block_<?php
+                                    echo $feature ?>_save_all_roles" class="button button-secondary save-profile-button" style="margin-left: 10px;">
+                                <?php esc_html_e( 'Save Permission for all Roles', 'advanced-gutenberg' ); ?>
                             </button>
                             <span class="advgb-enable-one-block-msg" style="display: none;">
                                 <span>
@@ -3532,14 +3674,17 @@ if (! class_exists('AdvancedGutenbergMain')) {
                     <h1 class="wp-heading-inline">
                         <?php esc_html_e('Block Usage', 'advanced-gutenberg'); ?>
                     </h1>
+                    <button class="page-title-action button button-secondary" id="header-scan-button" style="vertical-align: unset;" disabled style="opacity: 0.5; cursor: not-allowed;">
+                        <?php esc_html_e('Scan Block Usage', 'advanced-gutenberg'); ?>
+                    </button>
                 </header>
+
                 <div class="wrap">
-                        <div class="tab-content block-list-tab" id="advgb-block-usage-app">
-                            <div class="advgb-block-feature-loading-msg" style="display: block;">
-                                <?php
-                                _e('Loading...', 'advanced-gutenberg') ?>
-                            </div>
+                    <div class="tab-content block-list-tab" id="advgb-block-usage-app">
+                        <div class="advgb-block-feature-loading-msg" style="display: block;">
+                            <?php _e('Loading...', 'advanced-gutenberg') ?>
                         </div>
+                    </div>
                 </div>
             </div>
             <?php
@@ -3671,6 +3816,10 @@ if (! class_exists('AdvancedGutenbergMain')) {
                 $current_user_role = 'administrator';
             } else {
                 $current_user = wp_get_current_user();
+
+                if (empty($current_user->roles) || empty($current_user->roles[0])) {
+                    return $user_roles_data;
+                }
 
                 if (count($current_user->roles) === 1) {
                     // User has 1 user role
